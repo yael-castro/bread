@@ -23,3 +23,6 @@
 
 # Dependency directories
 vendor/
+
+# Runtime profiling
+*.pprof

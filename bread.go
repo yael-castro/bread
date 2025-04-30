@@ -8,6 +8,16 @@ import (
 	"sync"
 )
 
+const (
+	_ = 1 << (10 * iota)
+	// KB kilobytes
+	KB
+	// MB megabytes
+	MB
+	// GB gigabytes
+	GB
+)
+
 // Default Bread parameters
 const (
 	DefaultDelimiter byte = '\n'
@@ -16,6 +26,7 @@ const (
 
 var (
 	ErrNilReader         = errors.New("nil io reader")
+	ErrMissingContext    = errors.New("missing context")
 	ErrMissingWorkerFunc = errors.New("missing worker function")
 	ErrMissingBufferSize = errors.New("missing buffer size")
 )
@@ -44,11 +55,14 @@ type Bread struct {
 	Delimiter byte
 }
 
-// Eat
+// Eat helps to concurrently process the io.Reader in batches.
 //
-// NOTE: if the file does not have an end line the file will read completely
+// WARNING The Eat method is not concurrently safe if io.Reader is not.
+// WARNING If there is no Delimiter in the io.Reader, it will be read completely.
 func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 	switch {
+	case ctx == nil:
+		return ErrMissingContext
 	case reader == nil:
 		return ErrNilReader
 	case b.WorkerFunc == nil:
@@ -96,7 +110,7 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 
 		n, err = r.Read(*buffer)
 		if err != nil {
-			if err == io.EOF {
+			if errors.Is(err, io.EOF) {
 				break
 			}
 
@@ -106,7 +120,7 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 		*buffer = (*buffer)[:n]
 
 		complement, err = r.ReadBytes(b.Delimiter)
-		if err != nil && err != io.EOF {
+		if err != nil && !errors.Is(err, io.EOF) {
 			return err
 		}
 
