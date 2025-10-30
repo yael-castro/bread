@@ -9,7 +9,8 @@ import (
 )
 
 const (
-	_ = 1 << (10 * iota)
+	// B bytes
+	B = 1 << (10 * iota)
 	// KB kilobytes
 	KB
 	// MB megabytes
@@ -31,7 +32,8 @@ var (
 	ErrMissingBufferSize = errors.New("missing buffer size")
 )
 
-// Bread provides a way to read data line by line an io.Reader
+// Bread provides a way to read large amounts of data concurrently and
+// in a highly optimized way (optimize performance and memory usage)
 type Bread struct {
 	// WorkerFunc is used to process each data batch from the io.Reader
 	//
@@ -45,21 +47,35 @@ type Bread struct {
 	//
 	// This member is optional. Default value 0
 	BufferSeed uint32
-	// BufferSize indicates how big will be the buffers instanced
+	// BufferSize indicates the initial length and capacity of the byte batches (buffers)
 	//
 	// This member is required.
 	BufferSize uint32
 	// Delimiter delimits the end of a line/record, in order to avoid sending half-batches of information.
+	// For example.
+	//
+	// If the BufferSize is equal to 3, the io.Reader contains "Hello|Hello|Hello" and the Delimiter is "|"
+	// We have read until the "\n" and the outputs will be "Hello|", "Hello|", "Hello"
 	//
 	// This member is optional. Default value DefaultDelimiter
 	Delimiter byte
+	// NoDelimiter indicates if the delimiter should be ignored.
+	//
+	// If this value is true, the BufferSize indicates the maximum length
+	// that byte batches can have.
+	//
+	// If this member is true, the BufferSize indicates the maximum length
+	// that the batches of bytes can be.
+	//
+	// This member is optional. Default value is false
+	NoDelimiter bool
 }
 
 // Eat helps to concurrently process the io.Reader in batches.
 //
 // WARNING The Eat method is not concurrently safe if io.Reader is not.
 // WARNING If there is no Delimiter in the io.Reader, it will be read completely.
-func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
+func (b Bread) Eat(ctx context.Context, reader io.Reader) error {
 	switch {
 	case ctx == nil:
 		return ErrMissingContext
@@ -79,10 +95,15 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 		b.Workers = DefaultWorkers
 	}
 
-	// Worker settings
-	wg := sync.WaitGroup{}
-	workerCh := make(chan struct{}, b.Workers)
+	err := b.eat(ctx, reader)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
 
+	return nil
+}
+
+func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 	// Object pool in charge of handling buffers
 	pool := sync.Pool{
 		New: func() any {
@@ -96,12 +117,22 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 		pool.Put(pool.New())
 	}
 
+	// Concurrency management
+	wg := sync.WaitGroup{}
+	workerChan := make(chan struct{}, b.Workers)
+
+	// Guarantees wait to close all channels
+	defer close(workerChan)
+	defer wg.Wait()
+
+	// Objects to manage the buffered data
 	r := bufio.NewReader(reader)
 	n, complement := 0, make([]byte, 0)
 
 	for {
 		select {
 		case <-ctx.Done():
+			err = ctx.Err()
 			return
 		default:
 		}
@@ -111,7 +142,7 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 		n, err = r.Read(*buffer)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				break
+				return
 			}
 
 			return
@@ -119,14 +150,16 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 
 		*buffer = (*buffer)[:n]
 
-		complement, err = r.ReadBytes(b.Delimiter)
-		if err != nil && !errors.Is(err, io.EOF) {
-			return err
+		if !b.NoDelimiter {
+			complement, err = r.ReadBytes(b.Delimiter)
+			if err != nil && !errors.Is(err, io.EOF) {
+				return
+			}
+
+			*buffer = append(*buffer, complement...)
 		}
 
-		*buffer = append(*buffer, complement...)
-
-		workerCh <- struct{}{}
+		workerChan <- struct{}{}
 		wg.Add(1)
 
 		go func() {
@@ -135,12 +168,7 @@ func (b Bread) Eat(ctx context.Context, reader io.Reader) (err error) {
 			b.WorkerFunc(ctx, buffer)
 
 			pool.Put(buffer)
-			<-workerCh
+			<-workerChan
 		}()
 	}
-
-	close(workerCh)
-	wg.Wait()
-
-	return nil
 }
