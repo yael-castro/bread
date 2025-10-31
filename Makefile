@@ -6,6 +6,9 @@ pprof:
 mem_prof:
 	go tool pprof -http=:8080 mem.pprof
 
+benchmark:
+	go test . -o "bench_mem.test" -run ^# -bench . -benchmem -count=10 -timeout 60m -v
+
 cpu_prof:
 	go tool pprof -http=:8080 cpu.pprof
 

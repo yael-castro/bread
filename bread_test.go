@@ -4,16 +4,24 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"go.uber.org/goleak"
 	"io"
+	"os"
 	"strconv"
 	"testing"
+	"time"
 )
+
+func TestMain(m *testing.M) {
+	os.Exit(m.Run())
+}
 
 func TestBread_Eat(t *testing.T) {
 	cases := [...]struct {
 		ctx         context.Context
 		bread       Bread
 		reader      io.Reader
+		timeout     time.Duration
 		expectedErr error
 	}{
 		// Test case: nil context
@@ -34,24 +42,67 @@ func TestBread_Eat(t *testing.T) {
 			bread:       Bread{},
 			expectedErr: ErrNilReader,
 		},
-		// Test case: success!
+		// Canceled context
 		{
 			ctx: context.TODO(),
 			bread: Bread{
 				Workers:    16,
 				WorkerFunc: func(ctx context.Context, buffer *[]byte) {},
 				BufferSeed: 5,
-				BufferSize: 1 * MB,
+				BufferSize: MB,
 			},
-			reader: buffer(300 * MB),
+			reader:      buffer(KB),
+			timeout:     time.Nanosecond,
+			expectedErr: context.DeadlineExceeded,
+		},
+		// Go routine leaks
+		{
+			ctx: context.TODO(),
+			bread: Bread{
+				Workers: 16,
+				WorkerFunc: func(ctx context.Context, buffer *[]byte) {
+					<-ctx.Done()
+				},
+				BufferSeed: 5,
+				BufferSize: MB,
+			},
+			reader:      buffer(KB),
+			timeout:     300 * time.Millisecond,
+			expectedErr: context.DeadlineExceeded,
+		},
+		// Success!
+		{
+			ctx: context.TODO(),
+			bread: Bread{
+				Workers:    16,
+				WorkerFunc: func(ctx context.Context, buffer *[]byte) {},
+				BufferSeed: 5,
+				BufferSize: MB,
+			},
+			reader: buffer(GB),
 		},
 	}
 
-	for i, v := range cases {
+	for i, testCase := range cases {
 		t.Run(strconv.Itoa(i), func(t *testing.T) {
-			err := v.bread.Eat(v.ctx, v.reader)
-			if !errors.Is(err, v.expectedErr) {
-				t.Fatalf("expected error %v, got %v", v.expectedErr, err)
+			defer goleak.VerifyNone(t)
+
+			ctx := testCase.ctx
+
+			if testCase.timeout != 0 {
+				var cancel context.CancelFunc
+
+				ctx, cancel = context.WithTimeout(testCase.ctx, testCase.timeout)
+				defer cancel()
+			}
+
+			err := testCase.bread.Eat(ctx, testCase.reader)
+			if !errors.Is(err, testCase.expectedErr) {
+				t.Fatalf("expected error %v, got %v", testCase.expectedErr, err)
+			}
+
+			if err != nil {
+				t.Log("got error:", err)
 			}
 		})
 	}
@@ -89,6 +140,7 @@ func BenchmarkBread_Eat(b *testing.B) {
 		},
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 
 	for i, c := range cases {
