@@ -72,9 +72,10 @@ type Bread struct {
 }
 
 // Eat helps to concurrently process the io.Reader in batches.
+// Eat method ends until all workers finish or the context is cancelled
 //
 // WARNING The Eat method is not concurrently safe if io.Reader is not.
-// WARNING If there is no Delimiter in the io.Reader, it will be read completely.
+// WARNING If there is no Delimiter and NoDelimiter is false, the io.Reader will be read completely.
 func (b Bread) Eat(ctx context.Context, reader io.Reader) error {
 	switch {
 	case ctx == nil:
@@ -119,11 +120,18 @@ func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 
 	// Concurrency management
 	wg := sync.WaitGroup{}
-	workerChan := make(chan struct{}, b.Workers)
 
-	// Guarantees wait to close all channels
+	workerChan := make(chan struct{}, b.Workers)
 	defer close(workerChan)
-	defer wg.Wait()
+
+	// Listening done signal
+	doneChan := make(chan struct{}, 1)
+	defer close(doneChan)
+
+	go func() {
+		wg.Wait()
+		doneChan <- struct{}{}
+	}()
 
 	// Objects to manage the buffered data
 	r := bufio.NewReader(reader)
@@ -132,8 +140,7 @@ func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 	for {
 		select {
 		case <-ctx.Done():
-			err = ctx.Err()
-			return
+			break
 		default:
 		}
 
@@ -141,11 +148,7 @@ func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 
 		n, err = r.Read(*buffer)
 		if err != nil {
-			if errors.Is(err, io.EOF) {
-				return
-			}
-
-			return
+			break
 		}
 
 		*buffer = (*buffer)[:n]
@@ -153,7 +156,7 @@ func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 		if !b.NoDelimiter {
 			complement, err = r.ReadBytes(b.Delimiter)
 			if err != nil && !errors.Is(err, io.EOF) {
-				return
+				break
 			}
 
 			*buffer = append(*buffer, complement...)
@@ -170,5 +173,14 @@ func (b Bread) eat(ctx context.Context, reader io.Reader) (err error) {
 			pool.Put(buffer)
 			<-workerChan
 		}()
+	}
+
+	// Waiting for batch processing to complete, an error, or context cancellation.
+	select {
+	case <-ctx.Done():
+		<-doneChan
+		return ctx.Err()
+	case <-doneChan:
+		return
 	}
 }

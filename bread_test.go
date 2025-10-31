@@ -55,6 +55,21 @@ func TestBread_Eat(t *testing.T) {
 			timeout:     time.Nanosecond,
 			expectedErr: context.DeadlineExceeded,
 		},
+		// Go routine leaks
+		{
+			ctx: context.TODO(),
+			bread: Bread{
+				Workers: 16,
+				WorkerFunc: func(ctx context.Context, buffer *[]byte) {
+					<-ctx.Done()
+				},
+				BufferSeed: 5,
+				BufferSize: MB,
+			},
+			reader:      buffer(KB),
+			timeout:     300 * time.Millisecond,
+			expectedErr: context.DeadlineExceeded,
+		},
 		// Success!
 		{
 			ctx: context.TODO(),
